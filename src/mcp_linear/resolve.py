@@ -51,4 +51,7 @@ class Resolver:
         found = fmt.nodes(data.get("issues"))
         if not found:
             raise ResolutionError(f"No Linear issue found with identifier {identifier}.")
-        return found[0]["id"]
+        issue = found[0]
+        if "id" not in issue:
+            raise ResolutionError(f"Linear issue {identifier} has no UUID (server returned incomplete data).")
+        return issue["id"]

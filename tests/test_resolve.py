@@ -75,3 +75,28 @@ def test_issue_id_surfaces_an_api_error(resolver):
     with pytest.raises(ResolutionError) as excinfo:
         resolver.issue_id("GOV-1")
     assert "rate limited" in excinfo.value.message
+
+
+@respx.mock
+def test_issue_id_raises_when_id_is_missing(resolver):
+    respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(
+            200, json={"data": {"issues": {"nodes": [{"identifier": "GOV-123"}]}}}
+        )
+    )
+    with pytest.raises(ResolutionError) as excinfo:
+        resolver.issue_id("GOV-123")
+    assert "GOV-123" in excinfo.value.message
+
+
+@respx.mock
+def test_issue_id_rejects_malformed_identifier_without_network_call(resolver):
+    route = respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(
+            200, json={"data": {"issues": {"nodes": [{"id": "uuid-1"}]}}}
+        )
+    )
+    with pytest.raises(ResolutionError) as excinfo:
+        resolver.issue_id("not-an-identifier")
+    assert "GOV-123" in excinfo.value.message
+    assert route.call_count == 0
