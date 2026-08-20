@@ -90,21 +90,31 @@ class Resolver:
     def team_id(self, team: str) -> str:
         wanted = (team or "").strip().lower()
         available = self.teams()
-        for candidate in available:
-            if candidate["key"].lower() == wanted:
-                return candidate["id"]
-        for candidate in available:
-            if candidate["name"].lower() == wanted:
-                return candidate["id"]
+        for field in ("key", "name"):
+            matches = [c for c in available if c[field].lower() == wanted]
+            if len(matches) == 1:
+                return matches[0]["id"]
+            if len(matches) > 1:
+                candidates = ", ".join(f"{c['key']} ({c['name']})" for c in matches)
+                raise ResolutionError(
+                    f"'{team}' matches more than one team: {candidates}. "
+                    "Use the team's exact key instead."
+                )
         options = ", ".join(f"{c['key']} ({c['name']})" for c in available)
         raise ResolutionError(f"No Linear team matches '{team}'. Available teams: {options}.")
 
     def state_id(self, team_id: str, state: str) -> str:
         wanted = (state or "").strip().lower()
         available = self.states(team_id)
-        for candidate in available:
-            if candidate["name"].lower() == wanted:
-                return candidate["id"]
+        matches = [c for c in available if c["name"].lower() == wanted]
+        if len(matches) == 1:
+            return matches[0]["id"]
+        if len(matches) > 1:
+            candidates = ", ".join(f"{m['name']} ({m['type']})" for m in matches)
+            raise ResolutionError(
+                f"'{state}' matches more than one workflow state: {candidates}. "
+                "This team has multiple states with that name; disambiguate by type."
+            )
         options = ", ".join(c["name"] for c in available)
         raise ResolutionError(f"No workflow state matches '{state}'. Valid states: {options}.")
 
@@ -128,14 +138,22 @@ class Resolver:
         if not labels:
             return []
         available = self.labels(team_id)
-        by_name = {label["name"].lower(): label["id"] for label in available}
         resolved = []
         for wanted in labels:
-            found = by_name.get((wanted or "").strip().lower())
-            if found is None:
-                options = ", ".join(label["name"] for label in available)
+            wanted_lower = (wanted or "").strip().lower()
+            matches = [label for label in available if label["name"].lower() == wanted_lower]
+            if len(matches) == 1:
+                resolved.append(matches[0]["id"])
+                continue
+            if len(matches) > 1:
+                candidates = ", ".join(m["id"] for m in matches)
                 raise ResolutionError(
-                    f"No label matches '{wanted}' on this team. Available labels: {options}."
+                    f"'{wanted}' matches more than one label on this team: {candidates}. "
+                    "This team has multiple labels with that name (likely in different "
+                    "label groups); the request is ambiguous."
                 )
-            resolved.append(found)
+            options = ", ".join(label["name"] for label in available)
+            raise ResolutionError(
+                f"No label matches '{wanted}' on this team. Available labels: {options}."
+            )
         return resolved

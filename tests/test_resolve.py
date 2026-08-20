@@ -268,3 +268,64 @@ def test_label_ids_returns_an_empty_list_without_calling_the_api(resolver):
     )
     assert resolver.label_ids("team-gov", []) == []
     assert route.call_count == 0
+
+
+@respx.mock
+def test_team_id_reports_ambiguity_with_the_candidates(resolver):
+    payload = {
+        "data": {
+            "teams": {
+                "nodes": [
+                    {"id": "team-1", "key": "ENG", "name": "Shared"},
+                    {"id": "team-2", "key": "OPS", "name": "Shared"},
+                ]
+            }
+        }
+    }
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=payload))
+    with pytest.raises(ResolutionError) as excinfo:
+        resolver.team_id("Shared")
+    assert "ENG" in excinfo.value.message
+    assert "OPS" in excinfo.value.message
+
+
+@respx.mock
+def test_state_id_reports_ambiguity_with_the_candidates(resolver):
+    payload = {
+        "data": {
+            "team": {
+                "states": {
+                    "nodes": [
+                        {"id": "st-a", "name": "Blocked", "type": "started", "position": 0},
+                        {"id": "st-b", "name": "Blocked", "type": "backlog", "position": 1},
+                    ]
+                }
+            }
+        }
+    }
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=payload))
+    with pytest.raises(ResolutionError) as excinfo:
+        resolver.state_id("team-gov", "Blocked")
+    assert "started" in excinfo.value.message
+    assert "backlog" in excinfo.value.message
+
+
+@respx.mock
+def test_label_ids_reports_ambiguity_with_the_candidates(resolver):
+    payload = {
+        "data": {
+            "team": {
+                "labels": {
+                    "nodes": [
+                        {"id": "lb-a", "name": "bug"},
+                        {"id": "lb-b", "name": "bug"},
+                    ]
+                }
+            }
+        }
+    }
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=payload))
+    with pytest.raises(ResolutionError) as excinfo:
+        resolver.label_ids("team-gov", ["bug"])
+    assert "lb-a" in excinfo.value.message
+    assert "lb-b" in excinfo.value.message
