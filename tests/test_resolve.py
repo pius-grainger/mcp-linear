@@ -135,6 +135,16 @@ LABELS_PAYLOAD = {
     }
 }
 
+WORKSPACE_LABELS_PAYLOAD = {
+    "data": {
+        "issueLabels": {
+            "nodes": [{"id": "wl-1", "name": "Needs Design"}, {"id": "wl-2", "name": "bug"}]
+        }
+    }
+}
+
+EMPTY_WORKSPACE_LABELS_PAYLOAD = {"data": {"issueLabels": {"nodes": []}}}
+
 USERS_PAYLOAD = {
     "data": {
         "users": {
@@ -255,10 +265,16 @@ def test_label_ids_resolves_several_labels(resolver):
 
 @respx.mock
 def test_label_ids_lists_valid_labels_on_a_miss(resolver):
-    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=LABELS_PAYLOAD))
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=LABELS_PAYLOAD),
+            httpx.Response(200, json=WORKSPACE_LABELS_PAYLOAD),
+        ]
+    )
     with pytest.raises(ResolutionError) as excinfo:
         resolver.label_ids("team-gov", ["nonsense"])
     assert "bug" in excinfo.value.message
+    assert "Needs Design" in excinfo.value.message
 
 
 @respx.mock
@@ -435,10 +451,76 @@ def test_team_labels_are_refetched_after_an_empty_response(resolver):
     route = respx.post(LINEAR_API_URL).mock(
         side_effect=[
             httpx.Response(200, json={"data": {"team": None}}),
+            httpx.Response(200, json=EMPTY_WORKSPACE_LABELS_PAYLOAD),
             httpx.Response(200, json=LABELS_PAYLOAD),
         ]
     )
     with pytest.raises(ResolutionError):
         resolver.label_ids("team-gov", ["bug"])
     assert resolver.label_ids("team-gov", ["bug"]) == ["lb-1"]
+    assert route.call_count == 3
+
+
+@respx.mock
+def test_label_ids_falls_back_to_workspace_labels(resolver):
+    """The design resolves labels against the team's labels plus workspace labels."""
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=LABELS_PAYLOAD),
+            httpx.Response(200, json=WORKSPACE_LABELS_PAYLOAD),
+        ]
+    )
+    assert resolver.label_ids("team-gov", ["needs design"]) == ["wl-1"]
+
+
+@respx.mock
+def test_label_ids_prefers_a_team_label_over_a_same_named_workspace_label(resolver):
+    route = respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=LABELS_PAYLOAD),
+            httpx.Response(200, json=WORKSPACE_LABELS_PAYLOAD),
+        ]
+    )
+    assert resolver.label_ids("team-gov", ["bug"]) == ["lb-1"]
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_label_ids_reports_workspace_ambiguity_without_uuids(resolver):
+    duplicate_workspace = {
+        "data": {
+            "issueLabels": {
+                "nodes": [
+                    {"id": "wl-a", "name": "Needs Design"},
+                    {"id": "wl-b", "name": "Needs Design"},
+                ]
+            }
+        }
+    }
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=LABELS_PAYLOAD),
+            httpx.Response(200, json=duplicate_workspace),
+        ]
+    )
+    with pytest.raises(ResolutionError) as excinfo:
+        resolver.label_ids("team-gov", ["Needs Design"])
+    message = excinfo.value.message
+    assert "2 labels" in message
+    assert "workspace" in message
+    assert "wl-a" not in message
+
+
+@respx.mock
+def test_workspace_labels_are_fetched_once_and_cached(resolver):
+    route = respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=LABELS_PAYLOAD),
+            httpx.Response(200, json=WORKSPACE_LABELS_PAYLOAD),
+        ]
+    )
+    assert resolver.label_ids("team-gov", ["Needs Design", "needs design"]) == [
+        "wl-1",
+        "wl-1",
+    ]
     assert route.call_count == 2

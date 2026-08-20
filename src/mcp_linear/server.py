@@ -76,17 +76,29 @@ def list_states(team: str) -> list[dict]:
 @mcp.tool()
 def list_labels(team: str | None = None) -> list[dict]:
     """
-    List the issue labels available on a team, as {name}.
-    team: team key or full team name. Required — labels are team-scoped.
+    List the issue labels that can be applied to an issue, as {name}.
+    team: optional team key or full team name. With a team, returns that team's
+    own labels followed by the workspace-wide labels; without one, the
+    workspace-wide labels only. Names are what create_issue and update_issue
+    accept for `labels`.
     """
-    if not team:
-        return [{"error": "A team is required. Pass a team key such as GOV."}]
     resolver = _get_resolver()
     try:
-        team_id = resolver.team_id(team)
-        return [{"name": label["name"]} for label in resolver.labels(team_id)]
+        found = list(resolver.labels(resolver.team_id(team))) if team else []
+        found += resolver.workspace_labels()
     except ResolutionError as e:
         return [_fail(e)]
+
+    # A team label and a workspace label can share a name; resolution prefers the
+    # team's, so listing the name twice would only be noise.
+    seen: set[str] = set()
+    labels = []
+    for label in found:
+        name = label.get("name") or ""
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            labels.append({"name": name})
+    return labels
 
 
 @mcp.tool()

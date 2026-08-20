@@ -44,6 +44,7 @@ class Resolver:
         self._users: list[dict] | None = None
         self._states: dict[str, list[dict]] = {}
         self._labels: dict[str, list[dict]] = {}
+        self._workspace_labels: list[dict] | None = None
 
     def _execute(self, query: str, variables: dict) -> dict:
         data = self._client.execute(query, variables)
@@ -89,6 +90,12 @@ class Resolver:
             data = self._execute(queries.TEAM_LABELS, {"teamId": team_id})
             self._labels[team_id] = fmt.nodes((data.get("team") or {}).get("labels"))
         return self._labels[team_id]
+
+    def workspace_labels(self) -> list[dict]:
+        if not self._workspace_labels:
+            data = self._execute(queries.WORKSPACE_LABELS, {})
+            self._workspace_labels = fmt.nodes(data.get("issueLabels"))
+        return self._workspace_labels
 
     def team_id(self, team: str) -> str:
         wanted = (team or "").strip().lower()
@@ -159,35 +166,57 @@ class Resolver:
         options = ", ".join(u.get("displayName") or "?" for u in active)
         raise ResolutionError(f"No active user matches '{assignee}'. Known users: {options}.")
 
+    @staticmethod
+    def _match_label(available: list[dict], wanted: str, scope: str) -> str | None:
+        """The one label named `wanted` in this scope, or None if there is none."""
+        wanted_lower = wanted.strip().lower()
+        matches = [
+            label for label in available if (label.get("name") or "").lower() == wanted_lower
+        ]
+        if not matches:
+            return None
+        if len(matches) > 1:
+            # No second field distinguishes two labels with the same name, and
+            # the UUIDs that would distinguish them are exactly what this
+            # server keeps out of its output. Say what the caller must fix.
+            raise ResolutionError(
+                f"'{wanted}' matches {len(matches)} labels on {scope}. "
+                "Label names must be unique to resolve; rename or remove the "
+                "duplicate in Linear."
+            )
+        return matches[0]["id"]
+
     def label_ids(self, team_id: str, labels: list[str]) -> list[str]:
+        """Resolve label names against the team's labels, then workspace labels."""
         if not labels:
             return []
-        available = self.labels(team_id)
+        team_labels = self.labels(team_id)
+        workspace_labels: list[dict] | None = None
         resolved = []
         for wanted in labels:
-            wanted_lower = (wanted or "").strip().lower()
-            if not wanted_lower:
+            if not (wanted or "").strip():
                 raise ResolutionError(
                     "A label in the list was empty. Pass label names, e.g. ['bug']; "
                     "see list_labels."
                 )
-            matches = [
-                label for label in available if (label.get("name") or "").lower() == wanted_lower
-            ]
-            if len(matches) == 1:
-                resolved.append(matches[0]["id"])
-                continue
-            if len(matches) > 1:
-                # No second field distinguishes two labels with the same name, and
-                # the UUIDs that would distinguish them are exactly what this
-                # server keeps out of its output. Say what the caller must fix.
-                raise ResolutionError(
-                    f"'{wanted}' matches {len(matches)} labels on this team. "
-                    "Label names must be unique to resolve; rename or remove the "
-                    "duplicate in Linear."
+            label_id = self._match_label(team_labels, wanted, "this team")
+            if label_id is None:
+                # Fetched only once per call, and only when a team label missed.
+                if workspace_labels is None:
+                    workspace_labels = self.workspace_labels()
+                label_id = self._match_label(workspace_labels, wanted, "this workspace")
+            if label_id is None:
+                options = ", ".join(
+                    sorted(
+                        {
+                            label.get("name") or "?"
+                            for label in team_labels + (workspace_labels or [])
+                        }
+                    )
                 )
-            options = ", ".join(label.get("name") or "?" for label in available)
-            raise ResolutionError(
-                f"No label matches '{wanted}' on this team. Available labels: {options}."
-            )
+                raise ResolutionError(
+                    f"No label matches '{wanted}' on this team or in the workspace. "
+                    f"Available labels: {options}."
+                )
+            resolved.append(label_id)
         return resolved

@@ -7,6 +7,12 @@ likely divergences are: full-text search (`issueSearch(query:)` vs `searchIssues
 team-scoped labels (`team { labels }` vs `issueLabels(filter:)`), and the number
 comparator type (`Float!` vs `Int!`). If a query starts returning "Cannot query field ...",
 re-probe rather than guessing.
+
+`WORKSPACE_LABELS` is unverified on a second axis as well: the root
+`issueLabels` connection is assumed to return workspace-wide labels, but it may
+also return team-scoped labels belonging to other teams. Label resolution
+consults a team's own labels first for that reason, so a team label always wins
+over a same-named label found in the workspace scope.
 """
 
 ISSUE_FIELDS = """
@@ -102,6 +108,14 @@ query TeamLabels($teamId: String!) {
   team(id: $teamId) {
     labels(first: 250) { nodes { id name } }
   }
+}
+"""
+
+# Workspace-wide labels, the second scope for label resolution. The design's
+# match-rules table resolves a label against "team.labels plus workspace labels".
+WORKSPACE_LABELS = """
+query WorkspaceLabels {
+  issueLabels(first: 250) { nodes { id name } }
 }
 """
 

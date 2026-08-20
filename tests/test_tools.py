@@ -34,6 +34,14 @@ LABELS_PAYLOAD = {
     "data": {"team": {"labels": {"nodes": [{"id": "lb-1", "name": "bug"}]}}}
 }
 
+WORKSPACE_LABELS_PAYLOAD = {
+    "data": {
+        "issueLabels": {
+            "nodes": [{"id": "wl-1", "name": "Needs Design"}, {"id": "wl-2", "name": "bug"}]
+        }
+    }
+}
+
 USERS_PAYLOAD = {
     "data": {
         "users": {
@@ -113,20 +121,34 @@ def test_list_states_reports_an_unknown_team():
 
 
 @respx.mock
-def test_list_labels_for_a_team():
+def test_list_labels_for_a_team_includes_workspace_labels():
+    """The design resolves labels against team labels plus workspace labels."""
     respx.post(LINEAR_API_URL).mock(
         side_effect=[
             httpx.Response(200, json=TEAMS_PAYLOAD),
             httpx.Response(200, json=LABELS_PAYLOAD),
+            httpx.Response(200, json=WORKSPACE_LABELS_PAYLOAD),
         ]
     )
-    assert server.list_labels("GOV") == [{"name": "bug"}]
+    # "bug" exists in both scopes and is listed once.
+    assert server.list_labels("GOV") == [{"name": "bug"}, {"name": "Needs Design"}]
 
 
 @respx.mock
-def test_list_labels_without_a_team_requires_one():
-    result = server.list_labels()
-    assert "team" in result[0]["error"].lower()
+def test_list_labels_without_a_team_returns_workspace_labels():
+    route = respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(200, json=WORKSPACE_LABELS_PAYLOAD)
+    )
+    assert server.list_labels() == [{"name": "Needs Design"}, {"name": "bug"}]
+    # No team was named, so no teams lookup happened.
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_list_labels_reports_an_unknown_team():
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=TEAMS_PAYLOAD))
+    result = server.list_labels("NOPE")
+    assert "GOV" in result[0]["error"]
 
 
 @respx.mock
