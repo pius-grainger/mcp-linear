@@ -126,3 +126,15 @@ def test_execute_maps_a_non_dict_response_shape(client, non_dict_value):
     result = client.execute("query { viewer { id } }")
     assert "error" in result
     assert "unexpected response shape" in result["error"]
+
+
+@pytest.mark.parametrize("non_dict_data", [[], "error", 42, True])
+@respx.mock
+def test_execute_maps_a_non_dict_data_value(client, non_dict_data):
+    """`{"data": []}` used to reach callers and raise AttributeError past the boundary."""
+    respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(200, json={"data": non_dict_data})
+    )
+    result = client.execute("query { viewer { id } }")
+    assert "error" in result
+    assert "unexpected response shape" in result["error"]

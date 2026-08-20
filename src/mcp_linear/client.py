@@ -45,4 +45,10 @@ class LinearClient:
         data = payload.get("data")
         if data is None:
             return {"error": "Linear returned no data"}
+        # Callers treat `data` as a dict and probe it with `"error" in data`. A
+        # list or string here would either raise AttributeError past the tool
+        # boundary or silently take the error branch on a substring match.
+        if not isinstance(data, dict):
+            data_repr = repr(data)[:200]
+            return {"error": f"Linear returned an unexpected response shape: {data_repr}"}
         return data
