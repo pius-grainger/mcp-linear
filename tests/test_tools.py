@@ -395,3 +395,164 @@ def test_add_comment_reports_an_unsuccessful_mutation():
         ]
     )
     assert "error" in server.add_comment("GOV-123", "nope")
+
+
+CREATED_PAYLOAD = {
+    "data": {"issueCreate": {"success": True, "issue": ISSUE_NODE}}
+}
+
+UPDATED_PAYLOAD = {
+    "data": {"issueUpdate": {"success": True, "issue": ISSUE_NODE}}
+}
+
+
+@respx.mock
+def test_create_issue_sends_a_minimal_input():
+    import json
+
+    route = respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=TEAMS_PAYLOAD),
+            httpx.Response(200, json=CREATED_PAYLOAD),
+        ]
+    )
+    result = server.create_issue(team="GOV", title="Fix the widget")
+    variables = json.loads(route.calls.last.request.content)["variables"]
+    assert variables["input"] == {"teamId": "team-gov", "title": "Fix the widget"}
+    assert result["identifier"] == "GOV-123"
+
+
+@respx.mock
+def test_create_issue_resolves_state_assignee_and_labels_to_uuids():
+    import json
+
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=TEAMS_PAYLOAD),
+            httpx.Response(200, json=STATES_PAYLOAD),
+            httpx.Response(200, json=USERS_PAYLOAD),
+            httpx.Response(200, json=LABELS_PAYLOAD),
+            httpx.Response(200, json=CREATED_PAYLOAD),
+        ]
+    )
+    server.create_issue(
+        team="GOV",
+        title="Fix the widget",
+        description="It is broken.",
+        assignee="pius",
+        state="In Progress",
+        priority=2,
+        labels=["bug"],
+    )
+    variables = json.loads(respx.calls.last.request.content)["variables"]
+    assert variables["input"] == {
+        "teamId": "team-gov",
+        "title": "Fix the widget",
+        "description": "It is broken.",
+        "stateId": "st-2",
+        "assigneeId": "u-1",
+        "priority": 2,
+        "labelIds": ["lb-1"],
+    }
+
+
+@respx.mock
+def test_create_issue_rejects_an_empty_title_without_a_network_call():
+    route = respx.post(LINEAR_API_URL)
+    assert "error" in server.create_issue(team="GOV", title="  ")
+    assert route.call_count == 0
+
+
+@respx.mock
+def test_create_issue_rejects_an_out_of_range_priority():
+    route = respx.post(LINEAR_API_URL)
+    result = server.create_issue(team="GOV", title="x", priority=9)
+    assert "0" in result["error"] and "4" in result["error"]
+    assert route.call_count == 0
+
+
+@respx.mock
+def test_create_issue_reports_an_unknown_state_with_valid_options():
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=TEAMS_PAYLOAD),
+            httpx.Response(200, json=STATES_PAYLOAD),
+        ]
+    )
+    result = server.create_issue(team="GOV", title="x", state="Shipped")
+    assert "In Progress" in result["error"]
+
+
+@respx.mock
+def test_create_issue_reports_an_unsuccessful_mutation():
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=TEAMS_PAYLOAD),
+            httpx.Response(200, json={"data": {"issueCreate": {"success": False, "issue": None}}}),
+        ]
+    )
+    assert "error" in server.create_issue(team="GOV", title="x")
+
+
+@respx.mock
+def test_update_issue_sends_only_the_supplied_fields():
+    import json
+
+    route = respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=ISSUE_UUID_PAYLOAD),
+            httpx.Response(200, json=UPDATED_PAYLOAD),
+        ]
+    )
+    server.update_issue("GOV-123", title="New title")
+    variables = json.loads(route.calls.last.request.content)["variables"]
+    assert variables == {"id": "uuid-1", "input": {"title": "New title"}}
+
+
+@respx.mock
+def test_update_issue_resolves_state_against_the_issues_own_team():
+    """The team is not passed in; it comes from the identifier prefix."""
+    import json
+
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=ISSUE_UUID_PAYLOAD),
+            httpx.Response(200, json=TEAMS_PAYLOAD),
+            httpx.Response(200, json=STATES_PAYLOAD),
+            httpx.Response(200, json=UPDATED_PAYLOAD),
+        ]
+    )
+    server.update_issue("GOV-123", state="In Progress")
+    variables = json.loads(respx.calls.last.request.content)["variables"]
+    assert variables["input"] == {"stateId": "st-2"}
+
+
+@respx.mock
+def test_update_issue_rejects_a_call_with_nothing_to_change():
+    route = respx.post(LINEAR_API_URL)
+    assert "error" in server.update_issue("GOV-123")
+    assert route.call_count == 0
+
+
+@respx.mock
+def test_update_issue_allows_clearing_the_description_with_an_empty_string():
+    import json
+
+    route = respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=ISSUE_UUID_PAYLOAD),
+            httpx.Response(200, json=UPDATED_PAYLOAD),
+        ]
+    )
+    server.update_issue("GOV-123", description="")
+    assert json.loads(route.calls.last.request.content)["variables"]["input"] == {
+        "description": ""
+    }
+
+
+@respx.mock
+def test_update_issue_reports_a_missing_issue():
+    respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"issues": {"nodes": []}}})
+    )
+    assert "GOV-999" in server.update_issue("GOV-999", title="x")["error"]

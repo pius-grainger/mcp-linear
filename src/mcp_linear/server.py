@@ -229,5 +229,127 @@ def add_comment(identifier: str, body: str) -> dict:
     return fmt.comment(payload.get("comment") or {})
 
 
+_PRIORITY_HELP = "priority must be 0 (none), 1 (urgent), 2 (high), 3 (medium) or 4 (low)."
+
+
+def _check_priority(priority: int | None) -> str | None:
+    if priority is not None and priority not in (0, 1, 2, 3, 4):
+        return f"Invalid priority {priority}. {_PRIORITY_HELP}"
+    return None
+
+
+@mcp.tool()
+def create_issue(
+    team: str,
+    title: str,
+    description: str = "",
+    assignee: str | None = None,
+    state: str | None = None,
+    priority: int | None = None,
+    labels: list[str] | None = None,
+) -> dict:
+    """
+    Create a Linear issue. Returns the created issue including its new identifier.
+    team: team key or name, e.g. "GOV".
+    assignee: user display name or email. See list_users.
+    state: workflow state name, e.g. "Backlog". See list_states.
+    priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low.
+    labels: label names on that team. See list_labels.
+    """
+    if not (title or "").strip():
+        return {"error": "Issue title is empty."}
+    invalid = _check_priority(priority)
+    if invalid:
+        return {"error": invalid}
+
+    resolver = _get_resolver()
+    try:
+        team_id = resolver.team_id(team)
+        payload: dict = {"teamId": team_id, "title": title}
+        if description:
+            payload["description"] = description
+        if state:
+            payload["stateId"] = resolver.state_id(team_id, state)
+        if assignee:
+            payload["assigneeId"] = resolver.user_id(assignee)
+        if priority is not None:
+            payload["priority"] = priority
+        if labels:
+            payload["labelIds"] = resolver.label_ids(team_id, labels)
+    except ResolutionError as e:
+        return _fail(e)
+
+    data = _get_client().execute(queries.ISSUE_CREATE, {"input": payload})
+    if "error" in data:
+        return {"error": data["error"]}
+
+    result = data.get("issueCreate") or {}
+    if not result.get("success"):
+        return {"error": f"Linear rejected the new issue on team {team}."}
+    return fmt.issue(result.get("issue") or {})
+
+
+@mcp.tool()
+def update_issue(
+    identifier: str,
+    title: str | None = None,
+    description: str | None = None,
+    state: str | None = None,
+    assignee: str | None = None,
+    priority: int | None = None,
+    labels: list[str] | None = None,
+) -> dict:
+    """
+    Update fields on an existing Linear issue. Only the fields you pass are changed.
+    identifier: human issue identifier, e.g. "GOV-123".
+    state, assignee, labels: names, resolved against the issue's own team.
+    priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low.
+    Passing labels replaces the issue's labels entirely.
+    """
+    if all(
+        field is None
+        for field in (title, description, state, assignee, priority, labels)
+    ):
+        return {"error": f"Nothing to update on {identifier}. Pass at least one field."}
+    invalid = _check_priority(priority)
+    if invalid:
+        return {"error": invalid}
+
+    resolver = _get_resolver()
+    try:
+        issue_uuid = resolver.issue_id(identifier)
+        payload: dict = {}
+        if title is not None:
+            payload["title"] = title
+        if description is not None:
+            payload["description"] = description
+        if priority is not None:
+            payload["priority"] = priority
+        if state is not None or labels is not None:
+            # State and label UUIDs are team-scoped; the team comes from the
+            # identifier prefix, so the caller never has to repeat it.
+            team_key, _ = parse_identifier(identifier)
+            team_id = resolver.team_id(team_key)
+            if state is not None:
+                payload["stateId"] = resolver.state_id(team_id, state)
+            if labels is not None:
+                payload["labelIds"] = resolver.label_ids(team_id, labels)
+        if assignee is not None:
+            payload["assigneeId"] = resolver.user_id(assignee)
+    except ResolutionError as e:
+        return _fail(e)
+
+    data = _get_client().execute(
+        queries.ISSUE_UPDATE, {"id": issue_uuid, "input": payload}
+    )
+    if "error" in data:
+        return {"error": data["error"]}
+
+    result = data.get("issueUpdate") or {}
+    if not result.get("success"):
+        return {"error": f"Linear rejected the update to {identifier}."}
+    return fmt.issue(result.get("issue") or {})
+
+
 def main() -> None:
     mcp.run()
