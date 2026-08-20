@@ -676,6 +676,94 @@ def test_update_issue_allows_clearing_the_description_with_an_empty_string():
 
 
 @respx.mock
+def test_update_issue_resolves_labels_against_the_issues_own_team():
+    import json
+
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=ISSUE_UUID_PAYLOAD),
+            httpx.Response(200, json=TEAMS_PAYLOAD),
+            httpx.Response(200, json=LABELS_PAYLOAD),
+            httpx.Response(200, json=UPDATED_PAYLOAD),
+        ]
+    )
+    server.update_issue("GOV-123", labels=["bug"])
+    variables = json.loads(respx.calls.last.request.content)["variables"]
+    assert variables == {"id": "uuid-1", "input": {"labelIds": ["lb-1"]}}
+
+
+@respx.mock
+def test_update_issue_clears_labels_with_an_empty_list():
+    """`labels=[]` is an explicit clear, not an absent argument."""
+    import json
+
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=ISSUE_UUID_PAYLOAD),
+            httpx.Response(200, json=TEAMS_PAYLOAD),
+            httpx.Response(200, json=UPDATED_PAYLOAD),
+        ]
+    )
+    server.update_issue("GOV-123", labels=[])
+    variables = json.loads(respx.calls.last.request.content)["variables"]
+    assert variables["input"] == {"labelIds": []}
+
+
+@respx.mock
+def test_update_issue_resolves_the_assignee_to_a_uuid():
+    import json
+
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=ISSUE_UUID_PAYLOAD),
+            httpx.Response(200, json=USERS_PAYLOAD),
+            httpx.Response(200, json=UPDATED_PAYLOAD),
+        ]
+    )
+    server.update_issue("GOV-123", assignee="pius")
+    variables = json.loads(respx.calls.last.request.content)["variables"]
+    assert variables["input"] == {"assigneeId": "u-1"}
+
+
+@respx.mock
+def test_update_issue_rejects_a_blank_assignee_rather_than_reassigning():
+    """A blank string used to match any user with a null display name or email."""
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=ISSUE_UUID_PAYLOAD),
+            httpx.Response(200, json=USERS_WITH_NULL_DISPLAY_NAME_PAYLOAD),
+        ]
+    )
+    result = server.update_issue("GOV-123", assignee="")
+    assert "empty" in result["error"]
+
+
+@respx.mock
+def test_update_issue_sends_priority_zero():
+    """0 is a valid priority (none) and falsy; it must still reach the payload."""
+    import json
+
+    route = respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=ISSUE_UUID_PAYLOAD),
+            httpx.Response(200, json=UPDATED_PAYLOAD),
+        ]
+    )
+    server.update_issue("GOV-123", priority=0)
+    assert json.loads(route.calls.last.request.content)["variables"]["input"] == {
+        "priority": 0
+    }
+
+
+@respx.mock
+def test_update_issue_rejects_an_out_of_range_priority():
+    route = respx.post(LINEAR_API_URL)
+    result = server.update_issue("GOV-123", priority=9)
+    assert "0" in result["error"] and "4" in result["error"]
+    assert route.call_count == 0
+
+
+@respx.mock
 def test_update_issue_reports_a_missing_issue():
     respx.post(LINEAR_API_URL).mock(
         return_value=httpx.Response(200, json={"data": {"issues": {"nodes": []}}})
