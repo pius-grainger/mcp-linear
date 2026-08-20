@@ -20,7 +20,7 @@ UUIDs and returns an error listing valid options when a name does not match.
 | `add_comment` | Post a comment |
 | `list_teams` | Team keys and names |
 | `list_states` | Workflow states for a team |
-| `list_labels` | Labels available on a team |
+| `list_labels` | Labels on a team plus workspace labels (team optional) |
 | `list_users` | Active users |
 
 ## Setup
@@ -71,7 +71,10 @@ verification never ran.
 
 `scripts/probe_schema.py` performs the verification: point it at a real API
 key and it runs one read-only probe per query shape used by the tools above,
-reporting which fields Linear actually accepts.
+reporting which fields Linear actually accepts. The three mutations are covered
+too, by introspecting `IssueCreateInput`, `IssueUpdateInput` and
+`CommentCreateInput` and checking that every field the queries send is accepted
+— the probe never writes to your tracker.
 
 ```bash
 LINEAR_API_KEY=lin_api_... .venv/bin/python scripts/probe_schema.py <team-key> <issue-number> <issue-uuid>
@@ -89,6 +92,10 @@ The three likeliest divergences, in order of suspicion:
   Linear may instead require `issueLabels(filter: ...)`.
 - **Number comparator type** — `queries.py` declares the issue-number filter
   variable as `Float!`; Linear's `NumberComparator` may expect `Int!`.
+- **`viewer.assignedIssues` ordering** — `queries.py` passes
+  `orderBy: updatedAt`; the enum's spelling is unconfirmed.
+- **Workspace labels** — `queries.py` reads them from the root `issueLabels`
+  connection, which may also return other teams' labels.
 
 The test suite mocks HTTP at the `respx` layer and constructs its own
 responses, so it exercises the Python around each query but never sends a

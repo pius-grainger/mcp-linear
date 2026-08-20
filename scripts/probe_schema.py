@@ -1,4 +1,9 @@
-"""Retained pending a live API key: confirm Linear GraphQL field names before queries.py is trusted."""
+"""Retained pending a live API key: confirm Linear GraphQL field names before queries.py is trusted.
+
+Read-only throughout. The three mutations are covered by introspecting their
+input types rather than by executing them, so running this never writes to the
+tracker it is pointed at.
+"""
 import json
 import os
 import sys
@@ -45,10 +50,31 @@ PROBES = {
           issue(id: $id) { comments(first: 5) { nodes { id body createdAt user { displayName } } } }
         }
     """,
+    "my_issues": """
+        query {
+          viewer { assignedIssues(first: 2, orderBy: updatedAt) { nodes { identifier } } }
+        }
+    """,
+    # The three mutations are checked by introspecting their input types rather
+    # than by running them: a probe must not write to the user's tracker.
+    "input_fields": """
+        query($name: String!) { __type(name: $name) { inputFields { name } } }
+    """,
+}
+
+# The input-object fields queries.py actually sends, per mutation.
+EXPECTED_INPUT_FIELDS = {
+    "IssueCreateInput": [
+        "teamId", "title", "description", "stateId", "assigneeId", "priority", "labelIds",
+    ],
+    "IssueUpdateInput": [
+        "title", "description", "stateId", "assigneeId", "priority", "labelIds",
+    ],
+    "CommentCreateInput": ["issueId", "body"],
 }
 
 
-def run(name: str, query: str, variables: dict) -> None:
+def run(name: str, query: str, variables: dict) -> dict:
     resp = httpx.post(
         URL,
         headers={"Authorization": KEY},
@@ -59,6 +85,19 @@ def run(name: str, query: str, variables: dict) -> None:
     status = "ERRORS" if body.get("errors") else "ok"
     print(f"--- {name}: HTTP {resp.status_code} {status}")
     print(json.dumps(body, indent=2)[:1500])
+    return body
+
+
+def run_input_fields(type_name: str) -> None:
+    """Read-only check that a mutation input type accepts the fields we send."""
+    body = run(f"input_fields:{type_name}", PROBES["input_fields"], {"name": type_name})
+    found = {
+        field.get("name")
+        for field in ((body.get("data") or {}).get("__type") or {}).get("inputFields") or []
+    }
+    missing = [f for f in EXPECTED_INPUT_FIELDS[type_name] if f not in found]
+    verdict = "MISSING " + ", ".join(missing) if missing else "all sent fields accepted"
+    print(f"    {type_name}: {verdict}")
 
 
 if __name__ == "__main__":
@@ -71,3 +110,6 @@ if __name__ == "__main__":
         {"teamId": input("team UUID from the first probe: ").strip()})
     run("workspace_labels_and_users", PROBES["workspace_labels_and_users"], {})
     run("issue_comments", PROBES["issue_comments"], {"id": issue_uuid})
+    run("my_issues", PROBES["my_issues"], {})
+    for type_name in EXPECTED_INPUT_FIELDS:
+        run_input_fields(type_name)
