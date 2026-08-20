@@ -31,6 +31,10 @@ class LinearClient:
         except ValueError:
             return {"error": f"Linear returned a non-JSON response: {resp.text[:200]}"}
 
+        if not isinstance(payload, dict):
+            payload_repr = repr(payload)[:200]
+            return {"error": f"Linear returned an unexpected response shape: {payload_repr}"}
+
         # Linear reports most failures as HTTP 200 with a top-level errors array.
         if payload.get("errors"):
             messages = "; ".join(

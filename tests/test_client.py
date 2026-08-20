@@ -101,3 +101,28 @@ def test_execute_maps_a_transport_failure(client):
 def test_execute_maps_a_payload_with_neither_data_nor_errors(client):
     respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json={}))
     assert client.execute("query { viewer { id } }")["error"] == "Linear returned no data"
+
+
+@respx.mock
+def test_execute_maps_a_null_response_json_payload(client):
+    import json
+
+    respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(
+            200, content=b"null", headers={"content-type": "application/json"}
+        )
+    )
+    result = client.execute("query { viewer { id } }")
+    assert "error" in result
+    assert "unexpected response shape" in result["error"]
+
+
+@pytest.mark.parametrize("non_dict_value", [[], "string", 42, True])
+@respx.mock
+def test_execute_maps_a_non_dict_response_shape(client, non_dict_value):
+    respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(200, json=non_dict_value)
+    )
+    result = client.execute("query { viewer { id } }")
+    assert "error" in result
+    assert "unexpected response shape" in result["error"]
