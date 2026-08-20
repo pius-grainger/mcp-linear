@@ -46,6 +46,24 @@ def _fail(exc: ResolutionError) -> dict:
     return {"error": exc.message}
 
 
+def _canonical(items: list[dict], uuid: str, field: str, fallback: str) -> str:
+    """Canonical name for an already-resolved UUID, so the UUID stays internal.
+
+    Search filters match Linear's stored names, not the caller's spelling, so a
+    resolved entity is translated back to the name Linear holds.
+    """
+    for item in items:
+        if item.get("id") == uuid:
+            return item.get(field) or fallback
+    return fallback
+
+
+def _position(state: dict) -> float:
+    """Sort key for a workflow state. Missing or non-numeric sorts first."""
+    value = state.get("position")
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
 @mcp.tool()
 def list_teams() -> list[dict]:
     """
@@ -53,7 +71,10 @@ def list_teams() -> list[dict]:
     identifiers, e.g. the GOV in GOV-123.
     """
     try:
-        return [{"key": t["key"], "name": t["name"]} for t in _get_resolver().teams()]
+        return [
+            {"key": t.get("key") or "", "name": t.get("name") or ""}
+            for t in _get_resolver().teams()
+        ]
     except ResolutionError as e:
         return [_fail(e)]
 
@@ -68,9 +89,10 @@ def list_states(team: str) -> list[dict]:
     resolver = _get_resolver()
     try:
         team_id = resolver.team_id(team)
-        return [{"name": s["name"], "type": s["type"]} for s in resolver.states(team_id)]
+        states = sorted(resolver.states(team_id), key=_position)
     except ResolutionError as e:
         return [_fail(e)]
+    return [{"name": s.get("name") or "", "type": s.get("type") or ""} for s in states]
 
 
 @mcp.tool()
@@ -151,8 +173,17 @@ def list_my_issues(state: str | None = None, limit: int = 25) -> list[dict]:
     List issues assigned to the owner of the configured API key, most recently
     updated first.
     state: optional state-name filter, e.g. "In Progress". Case-insensitive.
+      The filter is applied after the fetch, so passing one makes the server
+      over-fetch (four times `limit`, at least 50 issues) and then cut the
+      result back to `limit`. It is therefore best-effort within that window:
+      a matching issue further down the list than the window reaches is not
+      returned. Raise `limit` if you suspect one is missing.
+    limit: maximum number of issues returned.
     """
-    data = _get_client().execute(queries.MY_ISSUES, {"first": limit})
+    # Without a state filter the fetch size is the result size, so ask for
+    # exactly what the caller wants.
+    fetch = max(limit * 4, 50) if state else limit
+    data = _get_client().execute(queries.MY_ISSUES, {"first": fetch})
     if "error" in data:
         return [{"error": data["error"]}]
 
@@ -162,7 +193,7 @@ def list_my_issues(state: str | None = None, limit: int = 25) -> list[dict]:
     ]
     if state:
         wanted = state.strip().lower()
-        issues = [i for i in issues if (i["state"] or "").lower() == wanted]
+        issues = [i for i in issues if (i["state"] or "").lower() == wanted][:limit]
     return issues
 
 
@@ -176,17 +207,43 @@ def search_issues(
 ) -> list[dict]:
     """
     Full-text search over Linear issues, with optional filters.
-    team: team key, e.g. "GOV".
-    state: exact state name, e.g. "In Progress".
-    assignee: user display name. Use list_users to discover valid names.
+    team: team key or full team name, e.g. "GOV" or "Governance".
+    state: workflow state name, e.g. "In Progress". Resolved against the team's
+      workflow when `team` is given; without a team there is no workflow to
+      resolve against, so the value is sent as written and must match the state
+      name Linear stores.
+    assignee: user display name, full name, or email. See list_users.
+    Names are resolved the same way create_issue resolves them: a name that does
+    not match returns an error listing the valid options, not an empty result.
     """
+    resolver = _get_resolver()
     issue_filter: dict = {}
-    if team:
-        issue_filter["team"] = {"key": {"eq": team.strip().upper()}}
-    if state:
-        issue_filter["state"] = {"name": {"eq": state}}
-    if assignee:
-        issue_filter["assignee"] = {"displayName": {"eq": assignee}}
+    try:
+        team_id = resolver.team_id(team) if team else None
+        if team_id:
+            issue_filter["team"] = {
+                "key": {"eq": _canonical(resolver.teams(), team_id, "key", team.strip())}
+            }
+        if state:
+            if team_id:
+                state_id = resolver.state_id(team_id, state)
+                state_name = _canonical(
+                    resolver.states(team_id), state_id, "name", state.strip()
+                )
+            else:
+                state_name = state.strip()
+            issue_filter["state"] = {"name": {"eq": state_name}}
+        if assignee:
+            user_id = resolver.user_id(assignee)
+            issue_filter["assignee"] = {
+                "displayName": {
+                    "eq": _canonical(
+                        resolver.users(), user_id, "displayName", assignee.strip()
+                    )
+                }
+            }
+    except ResolutionError as e:
+        return [_fail(e)]
 
     data = _get_client().execute(
         queries.SEARCH_ISSUES,

@@ -100,15 +100,30 @@ def test_list_teams_returns_an_error_list_on_api_failure():
 
 @respx.mock
 def test_list_states_returns_states_in_workflow_order():
+    """Linear does not promise the connection is ordered; `position` is the order."""
+    unordered = {
+        "data": {
+            "team": {
+                "states": {
+                    "nodes": [
+                        {"id": "st-3", "name": "Done", "type": "completed", "position": 2},
+                        {"id": "st-1", "name": "Backlog", "type": "backlog", "position": 0},
+                        {"id": "st-2", "name": "In Progress", "type": "started", "position": 1},
+                    ]
+                }
+            }
+        }
+    }
     respx.post(LINEAR_API_URL).mock(
         side_effect=[
             httpx.Response(200, json=TEAMS_PAYLOAD),
-            httpx.Response(200, json=STATES_PAYLOAD),
+            httpx.Response(200, json=unordered),
         ]
     )
     assert server.list_states("GOV") == [
         {"name": "Backlog", "type": "backlog"},
         {"name": "In Progress", "type": "started"},
+        {"name": "Done", "type": "completed"},
     ]
 
 
@@ -276,6 +291,42 @@ def test_list_my_issues_filters_by_state_name_case_insensitively():
 
 
 @respx.mock
+def test_list_my_issues_over_fetches_when_filtering_by_state():
+    """A match outside the naive `first: limit` window is still returned."""
+    import json
+
+    done = [
+        {**ISSUE_NODE, "identifier": f"GOV-{n}", "state": {"name": "Done"}}
+        for n in range(200, 203)
+    ]
+    match = {**ISSUE_NODE, "identifier": "GOV-300", "state": {"name": "In Progress"}}
+    route = respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"data": {"viewer": {"assignedIssues": {"nodes": done + [match]}}}},
+        )
+    )
+    result = server.list_my_issues(state="In Progress", limit=3)
+    assert [i["identifier"] for i in result] == ["GOV-300"]
+    assert json.loads(route.calls.last.request.content)["variables"]["first"] == 50
+
+
+@respx.mock
+def test_list_my_issues_caps_the_filtered_result_at_the_limit():
+    matches = [
+        {**ISSUE_NODE, "identifier": f"GOV-{n}", "state": {"name": "In Progress"}}
+        for n in range(400, 410)
+    ]
+    respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(
+            200, json={"data": {"viewer": {"assignedIssues": {"nodes": matches}}}}
+        )
+    )
+    result = server.list_my_issues(state="In Progress", limit=3)
+    assert [i["identifier"] for i in result] == ["GOV-400", "GOV-401", "GOV-402"]
+
+
+@respx.mock
 def test_list_my_issues_surfaces_an_api_error():
     respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=GRAPHQL_ERROR))
     assert server.list_my_issues() == [{"error": "Authentication required"}]
@@ -296,19 +347,71 @@ def test_search_issues_sends_the_query_and_limit():
 
 
 @respx.mock
-def test_search_issues_builds_a_filter_from_team_state_and_assignee():
+def test_search_issues_normalizes_team_state_and_assignee_to_canonical_names():
+    """Filters are built from resolved names, so the caller's spelling is
+    accepted exactly where create_issue would accept it."""
     import json
 
-    route = respx.post(LINEAR_API_URL).mock(
-        return_value=httpx.Response(200, json={"data": {"issueSearch": {"nodes": []}}})
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=TEAMS_PAYLOAD),
+            httpx.Response(200, json=STATES_PAYLOAD),
+            httpx.Response(200, json=USERS_PAYLOAD),
+            httpx.Response(200, json={"data": {"issueSearch": {"nodes": []}}}),
+        ]
     )
-    server.search_issues("widget", team="GOV", state="In Progress", assignee="pius")
-    variables = json.loads(route.calls.last.request.content)["variables"]
+    # A full team name, a lowercased state, and a full name rather than a
+    # display name: all of these used to return zero results silently.
+    server.search_issues(
+        "widget", team="Governance", state="in progress", assignee="Pius C"
+    )
+    variables = json.loads(respx.calls.last.request.content)["variables"]
     assert variables["filter"] == {
         "team": {"key": {"eq": "GOV"}},
         "state": {"name": {"eq": "In Progress"}},
         "assignee": {"displayName": {"eq": "pius"}},
     }
+
+
+@respx.mock
+def test_search_issues_reports_an_unknown_team_instead_of_an_empty_list():
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=TEAMS_PAYLOAD))
+    result = server.search_issues("widget", team="Nope")
+    assert len(result) == 1
+    assert "GOV" in result[0]["error"] and "PLAT" in result[0]["error"]
+
+
+@respx.mock
+def test_search_issues_reports_an_unknown_state_with_valid_options():
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=TEAMS_PAYLOAD),
+            httpx.Response(200, json=STATES_PAYLOAD),
+        ]
+    )
+    result = server.search_issues("widget", team="GOV", state="Shipped")
+    assert "In Progress" in result[0]["error"]
+
+
+@respx.mock
+def test_search_issues_reports_an_unknown_assignee_with_valid_options():
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=USERS_PAYLOAD))
+    result = server.search_issues("widget", assignee="nobody")
+    assert "pius" in result[0]["error"]
+
+
+@respx.mock
+def test_search_issues_passes_a_state_through_when_no_team_is_given():
+    """Without a team there is no workflow to resolve the state against."""
+    import json
+
+    route = respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"issueSearch": {"nodes": []}}})
+    )
+    server.search_issues("widget", state="In Progress")
+    variables = json.loads(route.calls.last.request.content)["variables"]
+    assert variables["filter"] == {"state": {"name": {"eq": "In Progress"}}}
+    assert route.call_count == 1
 
 
 @respx.mock
