@@ -37,6 +37,9 @@ class Resolver:
         # Metadata only. Issue content is never cached. A restart is the
         # invalidation mechanism: teams, states and labels change rarely, and a
         # stale miss produces a clear error rather than silent wrong behaviour.
+        # Empty results are deliberately NOT cached: a transient null response
+        # would otherwise poison the cache for the lifetime of the process and
+        # every later lookup would fail with an empty options list.
         self._teams: list[dict] | None = None
         self._users: list[dict] | None = None
         self._states: dict[str, list[dict]] = {}
@@ -64,74 +67,96 @@ class Resolver:
         return issue["id"]
 
     def teams(self) -> list[dict]:
-        if self._teams is None:
+        if not self._teams:
             data = self._execute(queries.TEAMS, {})
             self._teams = fmt.nodes(data.get("teams"))
         return self._teams
 
     def users(self) -> list[dict]:
-        if self._users is None:
+        if not self._users:
             data = self._execute(queries.USERS, {})
             self._users = fmt.nodes(data.get("users"))
         return self._users
 
     def states(self, team_id: str) -> list[dict]:
-        if team_id not in self._states:
+        if not self._states.get(team_id):
             data = self._execute(queries.TEAM_STATES, {"teamId": team_id})
             self._states[team_id] = fmt.nodes((data.get("team") or {}).get("states"))
         return self._states[team_id]
 
     def labels(self, team_id: str) -> list[dict]:
-        if team_id not in self._labels:
+        if not self._labels.get(team_id):
             data = self._execute(queries.TEAM_LABELS, {"teamId": team_id})
             self._labels[team_id] = fmt.nodes((data.get("team") or {}).get("labels"))
         return self._labels[team_id]
 
     def team_id(self, team: str) -> str:
         wanted = (team or "").strip().lower()
+        if not wanted:
+            raise ResolutionError(
+                "The team given was empty. Pass a team key such as GOV, or a full team name."
+            )
         available = self.teams()
         for field in ("key", "name"):
-            matches = [c for c in available if c[field].lower() == wanted]
+            matches = [c for c in available if (c.get(field) or "").lower() == wanted]
             if len(matches) == 1:
                 return matches[0]["id"]
             if len(matches) > 1:
-                candidates = ", ".join(f"{c['key']} ({c['name']})" for c in matches)
+                candidates = ", ".join(
+                    f"{c.get('key') or '?'} ({c.get('name') or '?'})" for c in matches
+                )
                 raise ResolutionError(
                     f"'{team}' matches more than one team: {candidates}. "
                     "Use the team's exact key instead."
                 )
-        options = ", ".join(f"{c['key']} ({c['name']})" for c in available)
+        options = ", ".join(
+            f"{c.get('key') or '?'} ({c.get('name') or '?'})" for c in available
+        )
         raise ResolutionError(f"No Linear team matches '{team}'. Available teams: {options}.")
 
     def state_id(self, team_id: str, state: str) -> str:
         wanted = (state or "").strip().lower()
+        if not wanted:
+            raise ResolutionError(
+                "The state given was empty. Pass a workflow state name such as "
+                "'In Progress'; see list_states."
+            )
         available = self.states(team_id)
-        matches = [c for c in available if c["name"].lower() == wanted]
+        matches = [c for c in available if (c.get("name") or "").lower() == wanted]
         if len(matches) == 1:
             return matches[0]["id"]
         if len(matches) > 1:
-            candidates = ", ".join(f"{m['name']} ({m['type']})" for m in matches)
+            candidates = ", ".join(
+                f"{m.get('name') or '?'} ({m.get('type') or '?'})" for m in matches
+            )
             raise ResolutionError(
                 f"'{state}' matches more than one workflow state: {candidates}. "
                 "This team has multiple states with that name; disambiguate by type."
             )
-        options = ", ".join(c["name"] for c in available)
+        options = ", ".join(c.get("name") or "?" for c in available)
         raise ResolutionError(f"No workflow state matches '{state}'. Valid states: {options}.")
 
     def user_id(self, assignee: str) -> str:
         wanted = (assignee or "").strip().lower()
+        if not wanted:
+            raise ResolutionError(
+                "The assignee given was empty. Pass a display name, full name or "
+                "email address; see list_users."
+            )
         active = [u for u in self.users() if u.get("active")]
         for field in ("displayName", "name", "email"):
             matches = [u for u in active if (u.get(field) or "").lower() == wanted]
             if len(matches) == 1:
                 return matches[0]["id"]
             if len(matches) > 1:
-                candidates = ", ".join(f"{m['name']} <{m['email']}>" for m in matches)
+                candidates = ", ".join(
+                    f"{m.get('name') or '?'} <{m.get('email') or '?'}>" for m in matches
+                )
                 raise ResolutionError(
                     f"'{assignee}' matches more than one user: {candidates}. "
                     "Use the email address instead."
                 )
-        options = ", ".join(u["displayName"] for u in active)
+        options = ", ".join(u.get("displayName") or "?" for u in active)
         raise ResolutionError(f"No active user matches '{assignee}'. Known users: {options}.")
 
     def label_ids(self, team_id: str, labels: list[str]) -> list[str]:
@@ -141,18 +166,27 @@ class Resolver:
         resolved = []
         for wanted in labels:
             wanted_lower = (wanted or "").strip().lower()
-            matches = [label for label in available if label["name"].lower() == wanted_lower]
+            if not wanted_lower:
+                raise ResolutionError(
+                    "A label in the list was empty. Pass label names, e.g. ['bug']; "
+                    "see list_labels."
+                )
+            matches = [
+                label for label in available if (label.get("name") or "").lower() == wanted_lower
+            ]
             if len(matches) == 1:
                 resolved.append(matches[0]["id"])
                 continue
             if len(matches) > 1:
-                candidates = ", ".join(m["id"] for m in matches)
+                # No second field distinguishes two labels with the same name, and
+                # the UUIDs that would distinguish them are exactly what this
+                # server keeps out of its output. Say what the caller must fix.
                 raise ResolutionError(
-                    f"'{wanted}' matches more than one label on this team: {candidates}. "
-                    "This team has multiple labels with that name (likely in different "
-                    "label groups); the request is ambiguous."
+                    f"'{wanted}' matches {len(matches)} labels on this team. "
+                    "Label names must be unique to resolve; rename or remove the "
+                    "duplicate in Linear."
                 )
-            options = ", ".join(label["name"] for label in available)
+            options = ", ".join(label.get("name") or "?" for label in available)
             raise ResolutionError(
                 f"No label matches '{wanted}' on this team. Available labels: {options}."
             )

@@ -311,7 +311,8 @@ def test_state_id_reports_ambiguity_with_the_candidates(resolver):
 
 
 @respx.mock
-def test_label_ids_reports_ambiguity_with_the_candidates(resolver):
+def test_label_ids_reports_ambiguity_by_name_and_count_not_uuid(resolver):
+    """UUIDs are excluded from all output, including error messages."""
     payload = {
         "data": {
             "team": {
@@ -327,5 +328,117 @@ def test_label_ids_reports_ambiguity_with_the_candidates(resolver):
     respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=payload))
     with pytest.raises(ResolutionError) as excinfo:
         resolver.label_ids("team-gov", ["bug"])
-    assert "lb-a" in excinfo.value.message
-    assert "lb-b" in excinfo.value.message
+    message = excinfo.value.message
+    assert "'bug'" in message
+    assert "2 labels" in message
+    assert "lb-a" not in message
+    assert "lb-b" not in message
+
+
+@respx.mock
+def test_team_id_rejects_a_blank_team_without_a_network_call(resolver):
+    route = respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(200, json=TEAMS_PAYLOAD)
+    )
+    with pytest.raises(ResolutionError) as excinfo:
+        resolver.team_id("   ")
+    assert "empty" in excinfo.value.message
+    assert route.call_count == 0
+
+
+@respx.mock
+def test_state_id_rejects_a_blank_state_without_a_network_call(resolver):
+    route = respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(200, json=STATES_PAYLOAD)
+    )
+    with pytest.raises(ResolutionError) as excinfo:
+        resolver.state_id("team-gov", "")
+    assert "empty" in excinfo.value.message
+    assert route.call_count == 0
+
+
+@respx.mock
+def test_user_id_rejects_a_blank_assignee_rather_than_matching_a_null_field(resolver):
+    """A user with a null email must not match the empty string."""
+    payload = {
+        "data": {
+            "users": {
+                "nodes": [
+                    {"id": "u-1", "name": "Pius C", "displayName": "pius",
+                     "email": "pius@example.com", "active": True},
+                    {"id": "u-2", "name": "No Email", "displayName": "noemail",
+                     "email": None, "active": True},
+                ]
+            }
+        }
+    }
+    route = respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=payload))
+    with pytest.raises(ResolutionError) as excinfo:
+        resolver.user_id("")
+    assert "empty" in excinfo.value.message
+    assert route.call_count == 0
+
+
+@respx.mock
+def test_label_ids_rejects_a_blank_label_in_the_list(resolver):
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=LABELS_PAYLOAD))
+    with pytest.raises(ResolutionError) as excinfo:
+        resolver.label_ids("team-gov", ["bug", "  "])
+    assert "empty" in excinfo.value.message
+
+
+@respx.mock
+def test_teams_are_refetched_after_an_empty_response(resolver):
+    """An empty metadata response must not poison the cache for the process."""
+    route = respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json={"data": {"teams": None}}),
+            httpx.Response(200, json=TEAMS_PAYLOAD),
+        ]
+    )
+    with pytest.raises(ResolutionError):
+        resolver.team_id("GOV")
+    assert resolver.team_id("GOV") == "team-gov"
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_users_are_refetched_after_an_empty_response(resolver):
+    route = respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json={"data": {"users": None}}),
+            httpx.Response(200, json=USERS_PAYLOAD),
+        ]
+    )
+    with pytest.raises(ResolutionError):
+        resolver.user_id("pius")
+    assert resolver.user_id("pius") == "u-1"
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_states_are_refetched_after_an_empty_response(resolver):
+    route = respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json={"data": {"team": None}}),
+            httpx.Response(200, json=STATES_PAYLOAD),
+        ]
+    )
+    with pytest.raises(ResolutionError):
+        resolver.state_id("team-gov", "Done")
+    assert resolver.state_id("team-gov", "Done") == "st-3"
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_team_labels_are_refetched_after_an_empty_response(resolver):
+    route = respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json={"data": {"team": None}}),
+            httpx.Response(200, json=LABELS_PAYLOAD),
+        ]
+    )
+    with pytest.raises(ResolutionError):
+        resolver.label_ids("team-gov", ["bug"])
+    assert resolver.label_ids("team-gov", ["bug"]) == ["lb-1"]
+    assert route.call_count == 2
