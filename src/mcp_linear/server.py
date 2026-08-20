@@ -3,8 +3,10 @@ import os
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
+from . import format as fmt
+from . import queries
 from .client import LinearClient
-from .resolve import ResolutionError, Resolver
+from .resolve import ResolutionError, Resolver, parse_identifier
 
 load_dotenv()
 
@@ -105,6 +107,82 @@ def list_users(query: str | None = None) -> list[dict]:
         return people
     needle = query.strip().lower()
     return [p for p in people if needle in p["name"].lower() or needle in p["email"].lower()]
+
+
+@mcp.tool()
+def get_issue(identifier: str) -> dict:
+    """
+    Fetch a Linear issue by its human identifier, e.g. "GOV-123".
+    Returns title, description, state, assignee, team, priority, labels, URL,
+    and the git branch name Linear suggests for the issue.
+    """
+    try:
+        team_key, number = parse_identifier(identifier)
+    except ResolutionError as e:
+        return _fail(e)
+
+    data = _get_client().execute(
+        queries.ISSUE_BY_TEAM_AND_NUMBER, {"teamKey": team_key, "number": number}
+    )
+    if "error" in data:
+        return {"error": data["error"]}
+
+    found = fmt.nodes(data.get("issues"))
+    if not found:
+        return {"error": f"No Linear issue found with identifier {identifier}."}
+    return fmt.issue(found[0])
+
+
+@mcp.tool()
+def list_my_issues(state: str | None = None, limit: int = 25) -> list[dict]:
+    """
+    List issues assigned to the owner of the configured API key, most recently
+    updated first.
+    state: optional state-name filter, e.g. "In Progress". Case-insensitive.
+    """
+    data = _get_client().execute(queries.MY_ISSUES, {"first": limit})
+    if "error" in data:
+        return [{"error": data["error"]}]
+
+    issues = [
+        fmt.issue(node)
+        for node in fmt.nodes((data.get("viewer") or {}).get("assignedIssues"))
+    ]
+    if state:
+        wanted = state.strip().lower()
+        issues = [i for i in issues if (i["state"] or "").lower() == wanted]
+    return issues
+
+
+@mcp.tool()
+def search_issues(
+    query: str,
+    team: str | None = None,
+    state: str | None = None,
+    assignee: str | None = None,
+    limit: int = 25,
+) -> list[dict]:
+    """
+    Full-text search over Linear issues, with optional filters.
+    team: team key, e.g. "GOV".
+    state: exact state name, e.g. "In Progress".
+    assignee: user display name. Use list_users to discover valid names.
+    """
+    issue_filter: dict = {}
+    if team:
+        issue_filter["team"] = {"key": {"eq": team.strip().upper()}}
+    if state:
+        issue_filter["state"] = {"name": {"eq": state}}
+    if assignee:
+        issue_filter["assignee"] = {"displayName": {"eq": assignee}}
+
+    data = _get_client().execute(
+        queries.SEARCH_ISSUES,
+        {"query": query, "first": limit, "filter": issue_filter or None},
+    )
+    if "error" in data:
+        return [{"error": data["error"]}]
+    return [fmt.issue(node) for node in fmt.nodes(data.get("issueSearch"))]
 
 
 def main() -> None:
