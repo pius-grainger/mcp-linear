@@ -304,3 +304,94 @@ def test_search_issues_omits_the_filter_when_no_filters_are_given():
 def test_search_issues_surfaces_an_api_error():
     respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=GRAPHQL_ERROR))
     assert server.search_issues("x") == [{"error": "Authentication required"}]
+
+
+ISSUE_UUID_PAYLOAD = {
+    "data": {"issues": {"nodes": [{"id": "uuid-1", "identifier": "GOV-123"}]}}
+}
+
+COMMENTS_PAYLOAD = {
+    "data": {
+        "issue": {
+            "comments": {
+                "nodes": [
+                    {
+                        "body": "Looks good.",
+                        "createdAt": "2026-08-03T09:00:00.000Z",
+                        "user": {"displayName": "pius"},
+                    }
+                ]
+            }
+        }
+    }
+}
+
+
+@respx.mock
+def test_get_comments_resolves_the_identifier_then_returns_comments():
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=ISSUE_UUID_PAYLOAD),
+            httpx.Response(200, json=COMMENTS_PAYLOAD),
+        ]
+    )
+    assert server.get_comments("GOV-123") == [
+        {"author": "pius", "body": "Looks good.", "created_at": "2026-08-03T09:00:00.000Z"}
+    ]
+
+
+@respx.mock
+def test_get_comments_reports_a_missing_issue():
+    respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"issues": {"nodes": []}}})
+    )
+    assert "GOV-999" in server.get_comments("GOV-999")[0]["error"]
+
+
+@respx.mock
+def test_add_comment_posts_the_body_against_the_resolved_uuid():
+    import json
+
+    route = respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=ISSUE_UUID_PAYLOAD),
+            httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "commentCreate": {
+                            "success": True,
+                            "comment": {
+                                "body": "PR is up.",
+                                "createdAt": "2026-08-04T09:00:00.000Z",
+                                "user": {"displayName": "pius"},
+                            },
+                        }
+                    }
+                },
+            ),
+        ]
+    )
+    result = server.add_comment("GOV-123", "PR is up.")
+    variables = json.loads(route.calls.last.request.content)["variables"]
+    assert variables["input"] == {"issueId": "uuid-1", "body": "PR is up."}
+    assert result["body"] == "PR is up."
+    assert result["author"] == "pius"
+
+
+@respx.mock
+def test_add_comment_rejects_an_empty_body_without_a_network_call():
+    route = respx.post(LINEAR_API_URL)
+    assert "error" in server.add_comment("GOV-123", "   ")
+    assert route.call_count == 0
+
+
+@respx.mock
+def test_add_comment_reports_an_unsuccessful_mutation():
+    respx.post(LINEAR_API_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=ISSUE_UUID_PAYLOAD),
+            httpx.Response(200, json={"data": {"commentCreate": {"success": False, "comment": None}}}),
+        ]
+    )
+    assert "error" in server.add_comment("GOV-123", "nope")

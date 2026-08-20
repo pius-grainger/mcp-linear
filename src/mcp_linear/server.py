@@ -185,5 +185,49 @@ def search_issues(
     return [fmt.issue(node) for node in fmt.nodes(data.get("issueSearch"))]
 
 
+@mcp.tool()
+def get_comments(identifier: str) -> list[dict]:
+    """
+    Fetch the comments on a Linear issue, oldest first.
+    identifier: human issue identifier, e.g. "GOV-123".
+    """
+    try:
+        issue_uuid = _get_resolver().issue_id(identifier)
+    except ResolutionError as e:
+        return [_fail(e)]
+
+    data = _get_client().execute(queries.ISSUE_COMMENTS, {"id": issue_uuid})
+    if "error" in data:
+        return [{"error": data["error"]}]
+    return [
+        fmt.comment(node) for node in fmt.nodes((data.get("issue") or {}).get("comments"))
+    ]
+
+
+@mcp.tool()
+def add_comment(identifier: str, body: str) -> dict:
+    """
+    Post a comment on a Linear issue. Markdown is supported.
+    identifier: human issue identifier, e.g. "GOV-123".
+    """
+    if not (body or "").strip():
+        return {"error": "Comment body is empty."}
+    try:
+        issue_uuid = _get_resolver().issue_id(identifier)
+    except ResolutionError as e:
+        return _fail(e)
+
+    data = _get_client().execute(
+        queries.COMMENT_CREATE, {"input": {"issueId": issue_uuid, "body": body}}
+    )
+    if "error" in data:
+        return {"error": data["error"]}
+
+    payload = data.get("commentCreate") or {}
+    if not payload.get("success"):
+        return {"error": f"Linear rejected the comment on {identifier}."}
+    return fmt.comment(payload.get("comment") or {})
+
+
 def main() -> None:
     mcp.run()
