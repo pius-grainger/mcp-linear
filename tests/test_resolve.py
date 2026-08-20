@@ -100,3 +100,171 @@ def test_issue_id_rejects_malformed_identifier_without_network_call(resolver):
         resolver.issue_id("not-an-identifier")
     assert "GOV-123" in excinfo.value.message
     assert route.call_count == 0
+
+
+TEAMS_PAYLOAD = {
+    "data": {
+        "teams": {
+            "nodes": [
+                {"id": "team-gov", "key": "GOV", "name": "Governance"},
+                {"id": "team-plat", "key": "PLAT", "name": "Platform"},
+            ]
+        }
+    }
+}
+
+STATES_PAYLOAD = {
+    "data": {
+        "team": {
+            "states": {
+                "nodes": [
+                    {"id": "st-1", "name": "Backlog", "type": "backlog", "position": 0},
+                    {"id": "st-2", "name": "In Progress", "type": "started", "position": 1},
+                    {"id": "st-3", "name": "Done", "type": "completed", "position": 2},
+                ]
+            }
+        }
+    }
+}
+
+LABELS_PAYLOAD = {
+    "data": {
+        "team": {
+            "labels": {"nodes": [{"id": "lb-1", "name": "bug"}, {"id": "lb-2", "name": "backend"}]}
+        }
+    }
+}
+
+USERS_PAYLOAD = {
+    "data": {
+        "users": {
+            "nodes": [
+                {"id": "u-1", "name": "Pius C", "displayName": "pius",
+                 "email": "pius@example.com", "active": True},
+                {"id": "u-2", "name": "Sam T", "displayName": "sam",
+                 "email": "sam@example.com", "active": True},
+                {"id": "u-3", "name": "Old Sam", "displayName": "sam",
+                 "email": "old@example.com", "active": False},
+            ]
+        }
+    }
+}
+
+
+@respx.mock
+def test_team_id_matches_on_key_case_insensitively(resolver):
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=TEAMS_PAYLOAD))
+    assert resolver.team_id("gov") == "team-gov"
+
+
+@respx.mock
+def test_team_id_matches_on_full_name(resolver):
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=TEAMS_PAYLOAD))
+    assert resolver.team_id("Platform") == "team-plat"
+
+
+@respx.mock
+def test_team_id_lists_valid_options_on_a_miss(resolver):
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=TEAMS_PAYLOAD))
+    with pytest.raises(ResolutionError) as excinfo:
+        resolver.team_id("Nope")
+    assert "GOV" in excinfo.value.message and "PLAT" in excinfo.value.message
+
+
+@respx.mock
+def test_teams_are_fetched_once_and_cached(resolver):
+    route = respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(200, json=TEAMS_PAYLOAD)
+    )
+    resolver.team_id("GOV")
+    resolver.team_id("PLAT")
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_state_id_matches_case_insensitively(resolver):
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=STATES_PAYLOAD))
+    assert resolver.state_id("team-gov", "in progress") == "st-2"
+
+
+@respx.mock
+def test_state_id_lists_valid_states_on_a_miss(resolver):
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=STATES_PAYLOAD))
+    with pytest.raises(ResolutionError) as excinfo:
+        resolver.state_id("team-gov", "Shipped")
+    assert "In Progress" in excinfo.value.message
+
+
+@respx.mock
+def test_states_are_cached_per_team(resolver):
+    route = respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(200, json=STATES_PAYLOAD)
+    )
+    resolver.state_id("team-gov", "Done")
+    resolver.state_id("team-gov", "Backlog")
+    assert route.call_count == 1
+    resolver.state_id("team-plat", "Done")
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_user_id_matches_on_display_name(resolver):
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=USERS_PAYLOAD))
+    assert resolver.user_id("pius") == "u-1"
+
+
+@respx.mock
+def test_user_id_matches_on_email(resolver):
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=USERS_PAYLOAD))
+    assert resolver.user_id("sam@example.com") == "u-2"
+
+
+@respx.mock
+def test_user_id_ignores_deactivated_users(resolver):
+    """Two users share displayName "sam"; only the active one counts, so no ambiguity."""
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=USERS_PAYLOAD))
+    assert resolver.user_id("sam") == "u-2"
+
+
+@respx.mock
+def test_user_id_reports_ambiguity_with_the_candidates(resolver):
+    payload = {
+        "data": {
+            "users": {
+                "nodes": [
+                    {"id": "u-1", "name": "Sam One", "displayName": "sam",
+                     "email": "one@example.com", "active": True},
+                    {"id": "u-2", "name": "Sam Two", "displayName": "sam",
+                     "email": "two@example.com", "active": True},
+                ]
+            }
+        }
+    }
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=payload))
+    with pytest.raises(ResolutionError) as excinfo:
+        resolver.user_id("sam")
+    assert "one@example.com" in excinfo.value.message
+    assert "two@example.com" in excinfo.value.message
+
+
+@respx.mock
+def test_label_ids_resolves_several_labels(resolver):
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=LABELS_PAYLOAD))
+    assert resolver.label_ids("team-gov", ["bug", "BACKEND"]) == ["lb-1", "lb-2"]
+
+
+@respx.mock
+def test_label_ids_lists_valid_labels_on_a_miss(resolver):
+    respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=LABELS_PAYLOAD))
+    with pytest.raises(ResolutionError) as excinfo:
+        resolver.label_ids("team-gov", ["nonsense"])
+    assert "bug" in excinfo.value.message
+
+
+@respx.mock
+def test_label_ids_returns_an_empty_list_without_calling_the_api(resolver):
+    route = respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(200, json=LABELS_PAYLOAD)
+    )
+    assert resolver.label_ids("team-gov", []) == []
+    assert route.call_count == 0

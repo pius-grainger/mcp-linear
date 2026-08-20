@@ -34,6 +34,13 @@ def parse_identifier(identifier: str) -> tuple[str, float]:
 class Resolver:
     def __init__(self, client: LinearClient):
         self._client = client
+        # Metadata only. Issue content is never cached. A restart is the
+        # invalidation mechanism: teams, states and labels change rarely, and a
+        # stale miss produces a clear error rather than silent wrong behaviour.
+        self._teams: list[dict] | None = None
+        self._users: list[dict] | None = None
+        self._states: dict[str, list[dict]] = {}
+        self._labels: dict[str, list[dict]] = {}
 
     def _execute(self, query: str, variables: dict) -> dict:
         data = self._client.execute(query, variables)
@@ -55,3 +62,80 @@ class Resolver:
         if "id" not in issue:
             raise ResolutionError(f"Linear issue {identifier} has no UUID (server returned incomplete data).")
         return issue["id"]
+
+    def teams(self) -> list[dict]:
+        if self._teams is None:
+            data = self._execute(queries.TEAMS, {})
+            self._teams = fmt.nodes(data.get("teams"))
+        return self._teams
+
+    def users(self) -> list[dict]:
+        if self._users is None:
+            data = self._execute(queries.USERS, {})
+            self._users = fmt.nodes(data.get("users"))
+        return self._users
+
+    def states(self, team_id: str) -> list[dict]:
+        if team_id not in self._states:
+            data = self._execute(queries.TEAM_STATES, {"teamId": team_id})
+            self._states[team_id] = fmt.nodes((data.get("team") or {}).get("states"))
+        return self._states[team_id]
+
+    def labels(self, team_id: str) -> list[dict]:
+        if team_id not in self._labels:
+            data = self._execute(queries.TEAM_LABELS, {"teamId": team_id})
+            self._labels[team_id] = fmt.nodes((data.get("team") or {}).get("labels"))
+        return self._labels[team_id]
+
+    def team_id(self, team: str) -> str:
+        wanted = (team or "").strip().lower()
+        available = self.teams()
+        for candidate in available:
+            if candidate["key"].lower() == wanted:
+                return candidate["id"]
+        for candidate in available:
+            if candidate["name"].lower() == wanted:
+                return candidate["id"]
+        options = ", ".join(f"{c['key']} ({c['name']})" for c in available)
+        raise ResolutionError(f"No Linear team matches '{team}'. Available teams: {options}.")
+
+    def state_id(self, team_id: str, state: str) -> str:
+        wanted = (state or "").strip().lower()
+        available = self.states(team_id)
+        for candidate in available:
+            if candidate["name"].lower() == wanted:
+                return candidate["id"]
+        options = ", ".join(c["name"] for c in available)
+        raise ResolutionError(f"No workflow state matches '{state}'. Valid states: {options}.")
+
+    def user_id(self, assignee: str) -> str:
+        wanted = (assignee or "").strip().lower()
+        active = [u for u in self.users() if u.get("active")]
+        for field in ("displayName", "name", "email"):
+            matches = [u for u in active if (u.get(field) or "").lower() == wanted]
+            if len(matches) == 1:
+                return matches[0]["id"]
+            if len(matches) > 1:
+                candidates = ", ".join(f"{m['name']} <{m['email']}>" for m in matches)
+                raise ResolutionError(
+                    f"'{assignee}' matches more than one user: {candidates}. "
+                    "Use the email address instead."
+                )
+        options = ", ".join(u["displayName"] for u in active)
+        raise ResolutionError(f"No active user matches '{assignee}'. Known users: {options}.")
+
+    def label_ids(self, team_id: str, labels: list[str]) -> list[str]:
+        if not labels:
+            return []
+        available = self.labels(team_id)
+        by_name = {label["name"].lower(): label["id"] for label in available}
+        resolved = []
+        for wanted in labels:
+            found = by_name.get((wanted or "").strip().lower())
+            if found is None:
+                options = ", ".join(label["name"] for label in available)
+                raise ResolutionError(
+                    f"No label matches '{wanted}' on this team. Available labels: {options}."
+                )
+            resolved.append(found)
+        return resolved
