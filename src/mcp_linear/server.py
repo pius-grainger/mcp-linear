@@ -98,7 +98,9 @@ def list_users(query: str | None = None) -> list[dict]:
         active = [u for u in _get_resolver().users() if u.get("active")]
     except ResolutionError as e:
         return [_fail(e)]
-    people = [{"name": u["displayName"], "email": u["email"]} for u in active]
+    people = [
+        {"name": u.get("displayName") or "", "email": u.get("email") or ""} for u in active
+    ]
     if not query:
         return people
     needle = query.strip().lower()

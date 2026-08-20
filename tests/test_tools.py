@@ -47,6 +47,19 @@ USERS_PAYLOAD = {
     }
 }
 
+USERS_WITH_NULL_DISPLAY_NAME_PAYLOAD = {
+    "data": {
+        "users": {
+            "nodes": [
+                {"id": "u-1", "name": "Pius C", "displayName": "pius",
+                 "email": "pius@example.com", "active": True},
+                {"id": "u-2", "name": "No Display", "displayName": None,
+                 "email": None, "active": True},
+            ]
+        }
+    }
+}
+
 GRAPHQL_ERROR = {"errors": [{"message": "Authentication required"}]}
 
 
@@ -127,3 +140,15 @@ def test_list_users_filters_by_substring_query():
     respx.post(LINEAR_API_URL).mock(return_value=httpx.Response(200, json=USERS_PAYLOAD))
     assert server.list_users("piu") == [{"name": "pius", "email": "pius@example.com"}]
     assert server.list_users("zzz") == []
+
+
+@respx.mock
+def test_list_users_tolerates_a_null_display_name_and_email():
+    respx.post(LINEAR_API_URL).mock(
+        return_value=httpx.Response(200, json=USERS_WITH_NULL_DISPLAY_NAME_PAYLOAD)
+    )
+    assert server.list_users() == [
+        {"name": "pius", "email": "pius@example.com"},
+        {"name": "", "email": ""},
+    ]
+    assert server.list_users("piu") == [{"name": "pius", "email": "pius@example.com"}]
