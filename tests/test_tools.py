@@ -337,11 +337,11 @@ def test_search_issues_sends_the_query_and_limit():
     import json
 
     route = respx.post(LINEAR_API_URL).mock(
-        return_value=httpx.Response(200, json={"data": {"issueSearch": {"nodes": [ISSUE_NODE]}}})
+        return_value=httpx.Response(200, json={"data": {"searchIssues": {"nodes": [ISSUE_NODE]}}})
     )
     result = server.search_issues("widget", limit=10)
     body = json.loads(route.calls.last.request.content)
-    assert body["variables"]["query"] == "widget"
+    assert body["variables"]["term"] == "widget"
     assert body["variables"]["first"] == 10
     assert result[0]["identifier"] == "GOV-123"
 
@@ -357,7 +357,7 @@ def test_search_issues_normalizes_team_state_and_assignee_to_canonical_names():
             httpx.Response(200, json=TEAMS_PAYLOAD),
             httpx.Response(200, json=STATES_PAYLOAD),
             httpx.Response(200, json=USERS_PAYLOAD),
-            httpx.Response(200, json={"data": {"issueSearch": {"nodes": []}}}),
+            httpx.Response(200, json={"data": {"searchIssues": {"nodes": []}}}),
         ]
     )
     # A full team name, a lowercased state, and a full name rather than a
@@ -406,7 +406,7 @@ def test_search_issues_passes_a_state_through_when_no_team_is_given():
     import json
 
     route = respx.post(LINEAR_API_URL).mock(
-        return_value=httpx.Response(200, json={"data": {"issueSearch": {"nodes": []}}})
+        return_value=httpx.Response(200, json={"data": {"searchIssues": {"nodes": []}}})
     )
     server.search_issues("widget", state="In Progress")
     variables = json.loads(route.calls.last.request.content)["variables"]
@@ -419,7 +419,7 @@ def test_search_issues_omits_the_filter_when_no_filters_are_given():
     import json
 
     route = respx.post(LINEAR_API_URL).mock(
-        return_value=httpx.Response(200, json={"data": {"issueSearch": {"nodes": []}}})
+        return_value=httpx.Response(200, json={"data": {"searchIssues": {"nodes": []}}})
     )
     server.search_issues("widget")
     assert json.loads(route.calls.last.request.content)["variables"]["filter"] is None

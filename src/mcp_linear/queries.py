@@ -1,18 +1,26 @@
 """GraphQL documents. Strings only, no logic.
 
-Field names below are drawn from Linear's documented schema and have NOT yet been
-verified against the live API. The schema probe in `scripts/probe_schema.py`
-performs that verification once a LINEAR_API_KEY is available. The three most
-likely divergences are: full-text search (`issueSearch(query:)` vs `searchIssues(term:)`),
-team-scoped labels (`team { labels }` vs `issueLabels(filter:)`), and the number
-comparator type (`Float!` vs `Int!`). If a query starts returning "Cannot query field ...",
-re-probe rather than guessing.
+Field names below were verified against the live Linear API on 2026-08-21 by
+running these exact documents through `scripts/probe_schema.py`. Verified as
+correct: the `Float!` number comparator, team-scoped `team { labels }`, the root
+`issueLabels` connection, `viewer.assignedIssues(orderBy: updatedAt)`, and the
+`IssueCreateInput` / `IssueUpdateInput` / `CommentCreateInput` field names.
 
-`WORKSPACE_LABELS` is unverified on a second axis as well: the root
-`issueLabels` connection is assumed to return workspace-wide labels, but it may
-also return team-scoped labels belonging to other teams. Label resolution
-consults a team's own labels first for that reason, so a team label always wins
-over a same-named label found in the workspace scope.
+One divergence was found and corrected: `issueSearch(query:)` rejects its
+`query` argument as deprecated. Full-text search now uses `searchIssues(term:)`,
+which returns `IssueSearchPayload` whose nodes are `IssueSearchResult`, NOT
+`Issue` — so it cannot spread `IssueFields`. `SEARCH_FIELDS` below is that same
+selection re-declared on `IssueSearchResult`; introspection confirmed the type
+carries every field `IssueFields` selects. Keep the two fragments in sync.
+
+If a query starts returning "Cannot query field ...", re-probe rather than
+guessing.
+
+`WORKSPACE_LABELS` remains unverified on one axis: the root `issueLabels`
+connection resolves, but whether it returns workspace-wide labels only, or also
+team-scoped labels belonging to other teams, was not established. Label
+resolution consults a team's own labels first for that reason, so a team label
+always wins over a same-named label found in the workspace scope.
 """
 
 ISSUE_FIELDS = """
@@ -68,12 +76,30 @@ query MyIssues($first: Int!) {
 """
 )
 
+# searchIssues returns IssueSearchResult, not Issue, so IssueFields cannot be
+# spread there. Same selection, different type condition. Keep in sync.
+SEARCH_FIELDS = """
+fragment SearchFields on IssueSearchResult {
+  identifier
+  title
+  description
+  priority
+  url
+  branchName
+  createdAt
+  updatedAt
+  state { name }
+  assignee { displayName }
+  team { key }
+  labels { nodes { name } }
+}
+"""
 SEARCH_ISSUES = (
-    ISSUE_FIELDS
+    SEARCH_FIELDS
     + """
-query SearchIssues($query: String!, $first: Int!, $filter: IssueFilter) {
-  issueSearch(query: $query, first: $first, filter: $filter) {
-    nodes { ...IssueFields }
+query SearchIssues($term: String!, $first: Int!, $filter: IssueFilter) {
+  searchIssues(term: $term, first: $first, filter: $filter) {
+    nodes { ...SearchFields }
   }
 }
 """

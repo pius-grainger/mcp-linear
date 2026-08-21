@@ -64,45 +64,47 @@ back with `add_comment`.
 
 ## Schema verification
 
-The GraphQL field names in `src/mcp_linear/queries.py` come from Linear's
-documented schema and have **not** been verified against the live API. No
-`LINEAR_API_KEY` was available while this project was built, so that
-verification never ran.
+The GraphQL field names in `src/mcp_linear/queries.py` were **verified against
+the live Linear API on 2026-08-21**, by running the tools' actual query strings
+(not copies of them) against a real workspace.
 
-`scripts/probe_schema.py` performs the verification: point it at a real API
-key and it runs one read-only probe per query shape used by the tools above,
-reporting which fields Linear actually accepts. The three mutations are covered
-too, by introspecting `IssueCreateInput`, `IssueUpdateInput` and
-`CommentCreateInput` and checking that every field the queries send is accepted
-— the probe never writes to your tracker.
+Verified correct:
+
+- the `Float!` issue-number comparator
+- team-scoped labels via `team { labels }`
+- the root `issueLabels` connection
+- `viewer.assignedIssues(orderBy: updatedAt)`
+- every field the three mutations send — `IssueCreateInput`, `IssueUpdateInput`
+  and `CommentCreateInput` all accept `teamId`, `title`, `description`,
+  `stateId`, `assigneeId`, `priority`, `labelIds`, `issueId` and `body` as used
+
+One divergence was found and fixed:
+
+- **Full-text search.** `issueSearch` rejects its `query` argument as
+  deprecated. Search now uses `searchIssues(term: ...)`, which returns
+  `IssueSearchPayload` whose nodes are `IssueSearchResult`, **not** `Issue` — so
+  it cannot spread the `IssueFields` fragment. `queries.py` declares a second
+  fragment, `SearchFields`, with the identical selection on that type.
+  Introspection confirmed `IssueSearchResult` carries every field `IssueFields`
+  selects. **If you change one fragment, change the other.**
+
+One thing remains unconfirmed:
+
+- **Workspace labels.** The root `issueLabels` connection resolves, but whether
+  it returns workspace-wide labels only — or also team-scoped labels belonging
+  to other teams — was not established. Label resolution consults a team's own
+  labels first, so a team label always wins over a same-named workspace one.
+
+To re-verify after a Linear schema change:
 
 ```bash
 LINEAR_API_KEY=lin_api_... .venv/bin/python scripts/probe_schema.py <team-key> <issue-number> <issue-uuid>
 ```
 
 It takes a team key, an existing issue number on that team, and that issue's
-UUID as arguments (and prompts once, interactively, for a team UUID printed by
-its first probe) — see the script for details.
-
-The three likeliest divergences, in order of suspicion:
-
-- **Full-text search** — `queries.py` calls `issueSearch(query: ...)`; Linear
-  may instead expose `searchIssues(term: ...)`.
-- **Team-scoped labels** — `queries.py` reads labels via `team { labels }`;
-  Linear may instead require `issueLabels(filter: ...)`.
-- **Number comparator type** — `queries.py` declares the issue-number filter
-  variable as `Float!`; Linear's `NumberComparator` may expect `Int!`.
-- **`viewer.assignedIssues` ordering** — `queries.py` passes
-  `orderBy: updatedAt`; the enum's spelling is unconfirmed.
-- **Workspace labels** — `queries.py` reads them from the root `issueLabels`
-  connection, which may also return other teams' labels.
-
-The test suite mocks HTTP at the `respx` layer and constructs its own
-responses, so it exercises the Python around each query but never sends a
-query to Linear — it passes regardless of whether these field names are
-correct. A schema mismatch would first surface on a real call, typically as
-`Cannot query field "..." on type "..."`. Run the probe before relying on this
-server against a live workspace.
+UUID (and prompts once, interactively, for a team UUID printed by its first
+probe). The probe is read-only: the mutations are checked by introspecting
+their input types, never by writing to your tracker.
 
 ## Notes
 

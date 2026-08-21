@@ -247,11 +247,11 @@ def search_issues(
 
     data = _get_client().execute(
         queries.SEARCH_ISSUES,
-        {"query": query, "first": limit, "filter": issue_filter or None},
+        {"term": query, "first": limit, "filter": issue_filter or None},
     )
     if "error" in data:
         return [{"error": data["error"]}]
-    return [fmt.issue(node) for node in fmt.nodes(data.get("issueSearch"))]
+    return [fmt.issue(node) for node in fmt.nodes(data.get("searchIssues"))]
 
 
 @mcp.tool()
